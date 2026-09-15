@@ -1,0 +1,40 @@
+# NXPC outside Henesys.
+#
+# The supply figures are read from one chain, Henesys. The other chains are not read
+# on-chain here — the surveyed figures from the internal supply definition document are carried
+# over as they are, and the screen marks them «per the document» together with the as-of date.
+#
+# Bridge structure (section 3 of the internal supply definition document):
+#   Henesys ──SourceBridge lock──▶ Avalanche C-Chain ──CCIP pool lock──▶ BNB · Monad
+# Everything that left Henesys went to Avalanche only, and the BNB·Monad supply is
+# already inside the Avalanche total. So you must not just add the four chains up.
+
+# `asOf` applies to the figures that are not read live — BNB and Monad.
+asOf: "2026-08-29"
+source:
+  en: "Internal supply definition document"
+
+chains:
+  # Read live, so the numbers below are only a fallback for when the endpoint is
+  # unreachable. Avalanche is the one chain this page can read for itself:
+  #   circulating = NXPC totalSupply − CCIP pool − the addresses we operate there
+  # The pool is collateral for the BNB and Monad wrapped tokens; leaving it in would
+  # count that supply twice, once here and once on those chains below.
+  - id: avalanche
+    label: { en: Avalanche C-Chain }
+    live: true
+    issued: 127852669
+    circulating: 111383210
+    note: { en: "ERC-20, bridged from Henesys" }
+
+  - id: bnb
+    label: { en: BNB Chain }
+    issued: 13730323
+    circulating: 13729421
+    note: { en: "CCIP burn-mint from Avalanche" }
+
+  - id: monad
+    label: { en: Monad }
+    issued: 312
+    circulating: 292
+    note: { en: "CCIP burn-mint from Avalanche" }

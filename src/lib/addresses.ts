@@ -1,0 +1,147 @@
+import { parse } from 'yaml';
+import { z } from 'zod';
+import raw from '../data/addresses.yaml?raw';
+import type { Lang } from '../i18n';
+import { WALLETS, isPolicyDeduction } from './wallets';
+
+/**
+ * Managed address registry — the contracts / EOAs the team operates.
+ *
+ * Its purpose differs from the supply registry (wallets.yaml).
+ * That one is the source of truth for "what gets deducted from circulating";
+ * this one is the list of "what we hold".
+ * An address may appear in both, and it shows up in each table in its own role.
+ */
+
+const L10n = z.object({ en: z.string().min(1) });
+
+const EntrySchema = z.object({
+  id: z.string().min(1),
+  type: z.enum(['contract', 'eoa']),
+  category: z.enum(['bridge', 'vault', 'treasury', 'ops', 'token', 'infra']),
+  chain: z.enum(['henesys', 'c-chain']),
+  label: L10n,
+  address: z.string().regex(/^0x[0-9a-fA-F]{40}$/, 'not a valid 20-byte address'),
+  standard: z.enum(['erc20', 'erc721']).optional(),
+  /** A temporary balance used only while the placeholder marker is present. Ignored with real data. */
+  balanceHint: z.number().nonnegative().optional(),
+});
+
+const RegistrySchema = z
+  .array(EntrySchema)
+  .min(1)
+  .refine((rows) => new Set(rows.map((r) => r.id)).size === rows.length, {
+    message: 'duplicate id',
+  })
+  /* Per chain, not globally. The deployer is shared across chains, so a C-Chain
+     contract legitimately sits at the same address as an unrelated Henesys one. */
+  .refine(
+    (rows) =>
+      new Set(rows.map((r) => `${r.chain}:${r.address.toLowerCase()}`)).size === rows.length,
+    { message: 'the same address is listed twice on one chain' },
+  )
+  .refine((rows) => rows.every((r) => r.type === 'contract' || !r.standard), {
+    message: 'standard may only be attached to contracts',
+  });
+
+export type AddressEntry = z.infer<typeof EntrySchema>;
+
+/** If the leading `# placeholder` line is present, the data is treated as temporary. */
+export const ADDRESSES_ARE_PLACEHOLDER = /^#\s*placeholder\b/m.test(raw);
+
+function load(): AddressEntry[] {
+  const parsed = parse(raw);
+  const result = RegistrySchema.safeParse(parsed);
+  if (!result.success) {
+    const detail = result.error.issues
+      .map((i) => `  addresses.yaml[${i.path.join('.')}] — ${i.message}`)
+      .join('\n');
+    throw new Error(`managed address registry validation failed:\n${detail}`);
+  }
+  return result.data;
+}
+
+export const ADDRESSES: AddressEntry[] = load();
+
+/**
+ * Addresses the circulating supply policy deducts, taken from the supply registry.
+ *
+ * Duplicated here the two would drift: wallets.yaml decides what is non-circulating
+ * and this tab only asks.
+ *
+ * The join has to include the chain. The supply registry is Henesys-only, and the
+ * deployer is shared across chains — C-Chain Treasury sits at the same address as
+ * TeamVestingWallet and is an unrelated contract. Matching on the address alone
+ * marked it non-circulating.
+ */
+const DEDUCTED = new Set(
+  WALLETS.filter((w) => isPolicyDeduction(w.tier) && w.address)
+    .map((w) => w.address!.toLowerCase()),
+);
+
+export const isNonCirculating = (address: string, chain: AddressEntry['chain']) =>
+  chain === 'henesys' && DEDUCTED.has(address.toLowerCase());
+
+/**
+ * Balances that back a token circulating somewhere else, marked `collateral` in the
+ * supply registry.
+ *
+ * They are left out of «total held» because the thing they back is already counted.
+ * The bridge lock stands behind the NXPC on C-Chain, which this tab lists further
+ * down; NextMeso holds NXPC against the NESO it issued; wNXPC the same against
+ * WNXPC. Adding them puts the address tab above circulating supply, which cannot be
+ * right — it was reporting 303M against a circulating supply of 302M.
+ *
+ * The rows still show their balances. They are real amounts at real addresses; they
+ * are just not amounts held on top of what the other rows already account for.
+ */
+const COLLATERAL = new Set(
+  WALLETS.filter((w) => w.collateral && w.address).map((w) => w.address!.toLowerCase()),
+);
+
+export const isCollateral = (address: string, chain: AddressEntry['chain']) =>
+  chain === 'henesys' && COLLATERAL.has(address.toLowerCase());
+
+export interface TokenInfo {
+  name?: string;
+  symbol?: string;
+  decimals?: number;
+  totalSupply?: number;
+}
+
+export interface LocalizedAddress {
+  id: string;
+  type: AddressEntry['type'];
+  category: AddressEntry['category'];
+  chain: AddressEntry['chain'];
+  standard?: AddressEntry['standard'];
+  label: string;
+  address: string;
+  /** True when the circulating supply policy deducts this address. */
+  nonCirculating: boolean;
+  /** True when the balance is already represented elsewhere and must not be added to the total. */
+  collateral: boolean;
+  /** null means it was not read — this must be distinguished from 0. */
+  balance: number | null;
+  token?: TokenInfo;
+}
+
+export function localizeAddresses(
+  lang: Lang,
+  balances: Record<string, number | null>,
+  tokens: Record<string, TokenInfo>,
+): LocalizedAddress[] {
+  return ADDRESSES.map((a) => ({
+    id: a.id,
+    type: a.type,
+    category: a.category,
+    chain: a.chain,
+    ...(a.standard ? { standard: a.standard } : {}),
+    nonCirculating: isNonCirculating(a.address, a.chain),
+    collateral: isCollateral(a.address, a.chain),
+    label: a.label[lang],
+    address: a.address,
+    balance: balances[a.id] ?? null,
+    ...(tokens[a.id] ? { token: tokens[a.id] } : {}),
+  }));
+}

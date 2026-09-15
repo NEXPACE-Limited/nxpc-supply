@@ -1,0 +1,516 @@
+---
+import Site from '../layouts/Site.astro';
+import { ADDRESSES, ADDRESSES_ARE_PLACEHOLDER, localizeAddresses, type TokenInfo } from '../lib/addresses';
+import { liveAddressSpec, liveAvaxAddressSpec, readAddresses, readHead, type Head } from '../lib/reads';
+import { RPC_URL, avaxExplorerAddress, explorerAddress, henesys } from '../lib/chain';
+import { categoryBar, type Segment } from '../lib/charts';
+import { createFmt } from '../lib/format';
+import { dict, type Lang } from '../i18n';
+
+interface Props { lang: Lang }
+const { lang } = Astro.props;
+
+const t = dict(lang);
+const F = createFmt(lang);
+
+/* Read everything in one shot with Multicall3 at build time.
+   Native balances and ERC-20/721 metadata go out as a single batch. */
+let balances: Record<string, number | null> = {};
+let tokens: Record<string, TokenInfo> = {};
+let failures: string[] = [];
+let head: Head = { chainId: henesys.id, blockNumber: 0, timestamp: 0 };
+let rpcError: string | null = null;
+const takenAt = Date.now();
+
+try {
+  const [read, headRead] = await Promise.all([readAddresses(ADDRESSES), readHead()]);
+  balances = read.balances;
+  tokens = read.tokens;
+  failures = read.failures;
+  head = headRead;
+} catch (err) {
+  rpcError = err instanceof Error ? err.message : String(err);
+}
+
+// In placeholder mode the on-chain values mean nothing, so fill them from balanceHint.
+if (ADDRESSES_ARE_PLACEHOLDER) {
+  balances = Object.fromEntries(
+    ADDRESSES.map((a) => [a.id, a.chain === 'henesys' ? (a.balanceHint ?? 0) : null]),
+  );
+  tokens = {};
+  failures = [];
+}
+
+// Sort by balance descending on the server — the pressed sort chip and the static HTML must not disagree.
+/* The same aggregate3 the supply tab makes, restricted to the Henesys rows. */
+const liveJson = JSON.stringify(liveAddressSpec(ADDRESSES));
+const liveAvaxJson = JSON.stringify(liveAvaxAddressSpec(ADDRESSES));
+
+const rows = localizeAddresses(lang, balances, tokens)
+  .sort((a, b) => (b.balance ?? -1) - (a.balance ?? -1));
+
+/* Colour says whether it circulates, the way it does on the supply tab: grey for
+   what the policy deducts, the MSU family for everything else. The categories are a
+   functional split and cut across that — treasury holds both the vesting wallets and
+   the operating ones — so the bar groups by circulating status first and only then by
+   category. Painting a whole category grey put 686M of vesting and 49M of working
+   treasury under one dark block.
+   Where a concept exists on both tabs it keeps its colour there. */
+const CAT_COLOR: Record<string, string> = {
+  bridge: 'var(--c-bridge)',
+  vault: 'var(--purple-2)',
+  treasury: 'var(--purple)',
+  ops: 'var(--blue-2)',
+  token: 'var(--pink)',
+  infra: 'var(--mint-2)',
+};
+const NONCIRC_SEG = 'noncirc';
+const CAT_LABEL: Record<string, string> = t.addr.cat;
+
+/* null means the read did not come back, so it drops out of the total — counting it
+   as 0 makes the total lie. The bridge lock drops out too: it is the collateral for
+   the C-Chain balances listed further down, so adding both counts it twice. */
+const readRows = rows.filter((r) => r.balance !== null);
+const unread = rows.length - readRows.length;
+const counted = (r: (typeof rows)[number]) => !r.collateral;
+const held = readRows.filter(counted).reduce((n, r) => n + (r.balance ?? 0), 0);
+const contracts = rows.filter((r) => r.type === 'contract').length;
+const eoas = rows.length - contracts;
+
+/* Holdings per category as a single cylinder bar. The distribution shows up before
+   you read the table. Both views are computed here so the toggle only has to change
+   which set of numbers the bar is drawn from — the category order stays fixed across
+   the two, or the segments would swap places mid-transition. */
+const circulating = rows.filter((r) => !r.nonCirculating);
+const totalOf = (rs: typeof rows, cat: string) =>
+  rs.filter((r) => r.category === cat && counted(r)).reduce((n, r) => n + (r.balance ?? 0), 0);
+
+const CATS = [...new Set(circulating.map((r) => r.category))]
+  .sort((a, b) => totalOf(circulating, b) - totalOf(circulating, a));
+
+const catSegments: Segment[] = [
+  {
+    id: NONCIRC_SEG,
+    label: t.term.nonCirculating,
+    value: rows.filter((r) => r.nonCirculating && counted(r)).reduce((n, r) => n + (r.balance ?? 0), 0),
+    color: 'var(--c-locked)',
+    sub: `${rows.filter((r) => r.nonCirculating).length}`,
+    subLabel: t.addr.perCat,
+  },
+  ...CATS.map((cat) => ({
+    id: cat,
+    label: CAT_LABEL[cat] ?? cat,
+    value: totalOf(circulating, cat),
+    color: CAT_COLOR[cat] ?? 'var(--ink-3)',
+    sub: `${circulating.filter((r) => r.category === cat).length}`,
+    subLabel: t.addr.perCat,
+  })),
+];
+
+const tiles = [
+  {
+    k: t.addr.totalHeld, v: F.full(held),
+    sub: unread > 0 ? `${t.hero.unit} · ${unread} ${t.addr.notRead}` : t.hero.unit,
+    color: 'var(--c-circ)',
+  },
+  { k: t.addr.countLabel, v: String(rows.length), sub: '', color: 'var(--ink-2)' },
+  { k: t.addr.contracts, v: String(contracts), sub: '', color: 'var(--c-bridge)' },
+  { k: t.addr.eoas, v: String(eoas), sub: '', color: 'var(--purple)' },
+];
+
+---
+
+<Site lang={lang} page="addresses" head={head} takenAt={takenAt} rpcError={rpcError} title={`${t.addr.title} — ${t.brand}`} description={t.addr.description}>
+
+  <Fragment slot="notice">
+    {ADDRESSES_ARE_PLACEHOLDER && (
+      <div class="notice" role="note">
+        <b>{t.notice.badge}</b>
+        <span class="mono">addresses.yaml</span>
+      </div>
+    )}
+  </Fragment>
+
+  <section class="band">
+    <div class="wrap">
+      <div class="sec-head sec-head-row">
+        <h2>{t.addr.title}</h2>
+        {/* Sits with the page title, not with the table filters: it changes the totals
+            above as well as the rows below, so it does not belong to either alone. */}
+        <div id="addrCirc" class="chips" role="group" aria-label={t.addr.excludeNonCirc}>
+          <button data-circ="1" aria-pressed="false">{t.addr.excludeNonCirc}</button>
+        </div>
+      </div>
+
+      <div class="tiles">
+        {tiles.map((x) => (
+          <div class="tile" style={`--tile-accent:${x.color}`}>
+            <div class="tile-k">{x.k}</div>
+            <div class="tile-v mono">{x.v}</div>
+            <div class="tile-s mono">{x.sub}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* The client re-sums this from the table rows, so no per-view figures ride along
+          here — one place computes them, and it is the one the reader is looking at. */}
+      {catSegments.length > 0 && (
+        <div class="catbar-host addr-catbar" set:html={categoryBar(catSegments, held, { fmt: F })} />
+      )}
+
+      {failures.length > 0 && (
+        <p class="warn mono">{t.table.readFailed}: {failures.slice(0, 8).join(', ')}</p>
+      )}
+    </div>
+  </section>
+
+  <section class="band band-alt" id="list">
+    <div class="wrap">
+      <div class="sec-head sec-head-row">
+        <h2>{t.nav.addresses}</h2>
+        <div class="control-row">
+          <div id="addrType" class="chips" role="group" aria-label={t.addr.colType}>
+            <button data-type="all" aria-pressed="true">{t.addr.filterAll}</button>
+            <button data-type="contract" aria-pressed="false">{t.addr.filterContract}</button>
+            <button data-type="eoa" aria-pressed="false">{t.addr.filterEoa}</button>
+          </div>
+          <div id="addrSort" class="chips" role="group" aria-label={t.addr.sortBalance}>
+            <button data-sort="balance" aria-pressed="true">↓ {t.addr.sortBalance}</button>
+            <button data-sort="label" aria-pressed="false">↓ {t.addr.sortLabel}</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="table-scroll">
+        <script type="application/json" id="liveSpec" set:html={liveJson} is:inline />
+          <script type="application/json" id="liveAvaxSpec" set:html={liveAvaxJson} is:inline />
+          <table class="wallets addresses">
+          <thead>
+            <tr>
+              <th>{t.addr.colLabel}</th>
+              <th>{t.addr.colType}</th>
+              <th>{t.addr.colChain}</th>
+              <th>{t.addr.colAddress}</th>
+              <th class="num">{t.addr.colBalance}</th>
+              <th>{t.addr.colToken}</th>
+            </tr>
+          </thead>
+          <tbody id="addrBody">
+            {rows.map((r) => (
+              <tr
+                data-type={r.type}
+                data-balance={r.balance ?? -1}
+                data-name={r.label.toLowerCase()}
+                data-cat={r.category}
+                data-noncirc={r.nonCirculating ? '1' : undefined}
+                data-uncounted={r.collateral ? '1' : undefined}
+              >
+                <td data-cell="title" data-label={t.addr.colLabel}>
+                  <span class="wg" style={`background:${CAT_COLOR[r.category]}`}></span>{r.label}
+                  <span class="cat-chip">{CAT_LABEL[r.category]}</span>
+                </td>
+                <td data-label={t.addr.colType}>
+                  <span class={`tag ${r.type === 'contract' ? 'tag-ct' : 'tag-eoa'}`}>
+                    {r.type === 'contract' ? t.addr.typeContract : t.addr.typeEoa}
+                  </span>
+                </td>
+                <td class="mono chain-cell" data-label={t.addr.colChain}>{r.chain}</td>
+                <td class="mono w-addr" data-label={t.addr.colAddress}>
+                  <span class="addr-wrap">
+                    <a
+                      href={r.chain === 'henesys' ? explorerAddress(r.address) : avaxExplorerAddress(r.address)}
+                      target="_blank"
+                      rel="noopener"
+                    >{F.addr(r.address)}</a>
+                    <button class="copy-btn" type="button" data-copy={r.address} title={t.addr.copy} aria-label={`${t.addr.copy} ${r.label}`}>⧉</button>
+                  </span>
+                </td>
+                {/* The figure has a span of its own: the live update writes into that,
+                    so rewriting it cannot wipe the note sitting beside it. */}
+                <td class="mono num" data-label={t.addr.colBalance} data-bal={r.id}>
+                  <span class="bal-v">
+                    {r.balance === null
+                      ? <span class="ph" title={t.addr.notReadWhy}>{t.addr.notRead}</span>
+                      : F.full(r.balance)}
+                  </span>
+                  {r.collateral && (
+                    <span class="not-counted" title={t.addr.notCountedWhy}>{t.addr.notCounted}</span>
+                  )}
+                </td>
+                <td class="mono token-cell" data-label={t.addr.colToken}>
+                  {r.standard ? (
+                    <>
+                      <span class="tag tag-std">{r.standard}</span>
+                      {r.token?.symbol && <span class="tk-sym">{r.token.symbol}</span>}
+                      {r.token?.totalSupply !== undefined && (
+                        <span class="tk-sup dim">{F.compact(r.token.totalSupply)}</span>
+                      )}
+                    </>
+                  ) : <span class="dim">—</span>}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div id="addrSummary" class="table-sum mono" role="status" aria-live="polite">
+        {t.addr.summary.replace('{n}', String(rows.length)).replace('{c}', String(contracts)).replace('{e}', String(eoas))}
+      </div>
+    </div>
+  </section>
+
+  <section class="band" id="addr-method">
+    <div class="wrap">
+      <div class="sec-head"><h2>{t.section.method}</h2></div>
+      <div class="method-grid">
+        <div class="method">
+          <ul class="kv">
+            <li><span>{t.method.endpoint}</span><b class="mono">{RPC_URL}</b></li>
+            <li><span>{t.method.multicall}</span><b class="mono">{henesys.contracts.multicall3.address}</b></li>
+            <li><span>{t.method.call}</span><b class="mono">{t.method.callValue}</b></li>
+            <li><span>{t.addr.colChain}</span><b class="mono">henesys</b></li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
+
+</Site>
+
+<script>
+  import { attachSegCard } from '../lib/segcard';
+
+  import { readLive } from '../lib/live';
+  import { createFmt } from '../lib/format';
+  import type { Lang } from '../i18n';
+
+  const T = JSON.parse(document.getElementById('i18nData')!.textContent!);
+
+  /* ---------- Live balances ----------
+     The same single aggregate3 the supply tab makes, so these are read on load
+     rather than being as old as the last build. Rows are updated in place and never
+     re-sorted — the order a reader is looking at should not move under them.
+     A failure leaves the built-in figures and hands the head request back. */
+  {
+    const Fl = createFmt((document.documentElement.lang || 'en') as Lang);
+    const paint = (balances: Record<string, number>) => {
+      for (const [id, v] of Object.entries(balances)) {
+        const cell = document.querySelector<HTMLElement>(`[data-bal="${id}"] .bal-v`);
+        if (cell) cell.textContent = Fl.full(v);
+        const row = cell?.closest('tr') as HTMLElement | null;
+        if (row) row.dataset.balance = String(v);
+      }
+    };
+    const specOf = (id: string) => {
+      const raw = document.getElementById(id)?.textContent;
+      return raw ? JSON.parse(raw) : null;
+    };
+
+    /* Two chains, two endpoints, fired together. Independent on purpose: one being
+       unreachable should cost that chain's balances and nothing else. Only the
+       Henesys read supplies the chain head the shell is waiting on. */
+    const henesys = specOf('liveSpec');
+    if (henesys) {
+      readLive(henesys)
+        .then((live) => {
+          paint(live.balances);
+          apply();
+          document.getElementById('chainPill')?.setAttribute('data-live', '');
+          document.dispatchEvent(new CustomEvent('nxpc:live', { detail: live }));
+        })
+        .catch(() => document.dispatchEvent(new CustomEvent('nxpc:live-failed')));
+    }
+    const avax = specOf('liveAvaxSpec');
+    if (avax?.ids?.length) readLive(avax).then((live) => { paint(live.balances); apply(); }).catch(() => {});
+  }
+
+  /* ---------- Category bar hover ---------- */
+  document
+    .querySelectorAll<HTMLElement>('.addr-catbar')
+    .forEach((h) => attachSegCard(h, { ofTotal: T.seg.ofTotal, holder: T.seg.holder, status: T.seg.status, addresses: T.seg.addresses }));
+
+  /* ---------- Filter · sort ---------- */
+  const F = createFmt((document.documentElement.lang || 'en') as Lang);
+  const body = document.getElementById('addrBody') as HTMLTableSectionElement | null;
+  const summary = document.getElementById('addrSummary');
+  const all = Array.from(body?.querySelectorAll<HTMLTableRowElement>('tr') ?? []);
+  let type = 'all';
+  let sort = 'balance';
+  /* Default off: the tab is a list of what the team holds, and hiding part of that by
+     default would be answering a question the reader has not asked yet. */
+  let hideNonCirc = false;
+
+  /* ---------- Category bar ----------
+     The bar is not redrawn on a toggle. The segments keep their identity and only
+     their width changes — CSS eases flex-grow, and the hover cards stay attached
+     because the elements never move.
+
+     Totals are summed from the rows rather than read off a server-rendered figure, so
+     a live read moves the bar and the tiles with the cells. Rows marked uncounted are
+     left out: the bridge lock is collateral for the C-Chain balances listed further
+     down, and adding both would count it twice. */
+  const bar = document.querySelector<HTMLElement>('.addr-catbar');
+
+  const totalsOf = (rows: HTMLTableRowElement[]) => {
+    const per = new Map<string, { v: number; n: number }>();
+    let total = 0;
+    for (const tr of rows) {
+      const bal = Number(tr.dataset.balance);
+      const v = Number.isFinite(bal) && bal > 0 ? bal : 0;
+      /* Same buckets the server drew: non-circulating first, then category. */
+      const cat = tr.dataset.noncirc === '1' ? 'noncirc' : (tr.dataset.cat ?? '');
+      const e = per.get(cat) ?? { v: 0, n: 0 };
+      e.n += 1;
+      if (tr.dataset.uncounted !== '1') { e.v += v; total += v; }
+      per.set(cat, e);
+    }
+    return { per, total };
+  };
+
+  /* ---------- Counting figures ----------
+     A toggle can take «total held» from 861M to 141M. Swapping the text puts a
+     different number in the same place with nothing connecting them; counting
+     through shows that one became the other, and gives the eye the same half-second
+     the bar takes to resize.
+
+     The value being counted is kept on the element, because the rendered text is
+     formatted — «735M» does not parse back into a number to count from. */
+  const reduced = matchMedia('(prefers-reduced-motion: reduce)');
+  const running = new WeakMap<HTMLElement, number>();
+
+  function countTo(el: HTMLElement | null, to: number, fmt: (n: number) => string) {
+    if (!el) return;
+    const prev = el.dataset.v;
+    el.dataset.v = String(to);
+    // Nothing to count from on the first paint, and nothing to count when it did not move.
+    const from = prev === undefined ? to : Number(prev);
+    cancelAnimationFrame(running.get(el) ?? 0);
+    if (reduced.matches || from === to) { el.textContent = fmt(to); return; }
+
+    const t0 = performance.now();
+    const DUR = 560;
+    const ease = (u: number) => 1 - (1 - u) ** 3;
+    const step = (now: number) => {
+      const u = Math.min(1, (now - t0) / DUR);
+      el.textContent = fmt(from + (to - from) * ease(u));
+      if (u < 1) running.set(el, requestAnimationFrame(step));
+    };
+    running.set(el, requestAnimationFrame(step));
+  }
+
+  function paintBar(rows: HTMLTableRowElement[]) {
+    if (!bar) return;
+    const { per, total } = totalsOf(rows);
+    const segs = [...bar.querySelectorAll<HTMLElement>('.catbar-seg')];
+    const legend = [...bar.querySelectorAll<HTMLElement>('.lg-item')];
+    const vals = segs.map((el) => per.get(el.dataset.seg ?? '')?.v ?? 0);
+    const counts = segs.map((el) => String(per.get(el.dataset.seg ?? '')?.n ?? 0));
+
+    segs.forEach((el, i) => {
+      const v = vals[i] ?? 0;
+      el.style.flexGrow = String(v);
+      /* A zero-width segment is still in the flex row and still focusable. Take it out
+         of the tab order and off the pointer while it has nothing to show. */
+      el.toggleAttribute('data-empty', v === 0);
+      el.dataset.value = F.full(v);
+      el.dataset.pct = total > 0 ? F.pct(v / total) : '—';
+    });
+    legend.forEach((li, i) => {
+      const v = vals[i] ?? 0;
+      li.hidden = v === 0;
+      li.dataset.value = F.full(v);
+      li.dataset.pct = total > 0 ? F.pct(v / total) : '—';
+      li.dataset.sub = counts[i] ?? '';
+      countTo(li.querySelector<HTMLElement>('.lg-val'), v, (n) => F.compact(n));
+      countTo(li.querySelector<HTMLElement>('.lg-pct'), total > 0 ? (v / total) * 100 : 0,
+        (n) => (total > 0 ? F.pct(n / 100) : '—'));
+    });
+
+  }
+
+  /** The tiles count what the table is showing; leaving them on the full set puts two
+      different answers to the same question on one screen. */
+  function paintTiles(visible: HTMLTableRowElement[]) {
+    const { total } = totalsOf(visible);
+    const ct = visible.filter((tr) => tr.dataset.type === 'contract').length;
+    const tiles = document.querySelectorAll<HTMLElement>('.tile-v');
+    countTo(tiles[0] ?? null, total, (n) => F.full(n));
+    countTo(tiles[1] ?? null, visible.length, (n) => String(Math.round(n)));
+    countTo(tiles[2] ?? null, ct, (n) => String(Math.round(n)));
+    countTo(tiles[3] ?? null, visible.length - ct, (n) => String(Math.round(n)));
+  }
+
+  function apply() {
+    const visible = all.filter(
+      (tr) =>
+        (type === 'all' || tr.dataset.type === type) &&
+        !(hideNonCirc && tr.dataset.noncirc === '1'),
+    );
+    for (const tr of all) tr.hidden = !visible.includes(tr);
+
+    const sorted = [...visible].sort((a, b) =>
+      sort === 'balance'
+        ? Number(b.dataset.balance) - Number(a.dataset.balance)
+        : (a.dataset.name ?? '').localeCompare(b.dataset.name ?? ''),
+    );
+    for (const tr of sorted) body?.appendChild(tr);
+
+    const ct = visible.filter((tr) => tr.dataset.type === 'contract').length;
+    if (summary) {
+      summary.textContent = String(T.addr.summary)
+        .replace('{n}', String(visible.length))
+        .replace('{c}', String(ct))
+        .replace('{e}', String(visible.length - ct));
+    }
+    paintBar(visible);
+    paintTiles(visible);
+  }
+
+  document.querySelectorAll<HTMLButtonElement>('#addrType button').forEach((b) => {
+    b.addEventListener('click', () => {
+      type = b.dataset.type ?? 'all';
+      document.querySelectorAll('#addrType button').forEach((x) =>
+        x.setAttribute('aria-pressed', String(x === b)));
+      apply();
+    });
+  });
+  document.querySelectorAll<HTMLButtonElement>('#addrCirc button').forEach((b) => {
+    b.addEventListener('click', () => {
+      hideNonCirc = !hideNonCirc;
+      b.setAttribute('aria-pressed', String(hideNonCirc));
+      apply();
+    });
+  });
+  document.querySelectorAll<HTMLButtonElement>('#addrSort button').forEach((b) => {
+    b.addEventListener('click', () => {
+      sort = b.dataset.sort ?? 'balance';
+      document.querySelectorAll('#addrSort button').forEach((x) =>
+        x.setAttribute('aria-pressed', String(x === b)));
+      apply();
+    });
+  });
+  apply();
+
+  /* ---------- Copy address ---------- */
+  document.querySelectorAll<HTMLButtonElement>('.copy-btn').forEach((b) => {
+    b.addEventListener('click', async () => {
+      const v = b.dataset.copy;
+      if (!v) return;
+      try {
+        await navigator.clipboard.writeText(v);
+      } catch {
+        // Environment with no clipboard permission — leave the text selectable and move on quietly
+        return;
+      }
+      const base = b.getAttribute('aria-label') ?? T.addr.copy;
+      b.classList.add('is-copied');
+      b.setAttribute('title', T.addr.copied);
+      b.setAttribute('aria-label', `${T.addr.copied} — ${base}`);
+      setTimeout(() => {
+        b.classList.remove('is-copied');
+        b.setAttribute('title', T.addr.copy);
+        b.setAttribute('aria-label', base);
+      }, 1200);
+    });
+  });
+</script>

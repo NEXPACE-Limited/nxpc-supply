@@ -1,0 +1,116 @@
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+
+  schedule:
+    # Daily 03:20 UTC — records one point in the time series, then rebuilds and deploys.
+    # One point per day is the grid the backfill produced, and a series has to keep
+    # the spacing it was built on: the charts place points by date, so a run that is
+    # skipped leaves a real gap rather than a shorter step.
+    # The rebuild also refreshes the built-in figures. That is not what keeps the
+    # numbers current — the browser reads balances live on load — it refreshes the
+    # fallback that curl and a JavaScript-less reader get.
+    # Minute 20, not 0: on-the-hour schedules queue behind everyone else's.
+    - cron: '20 3 * * *'
+
+  workflow_dispatch:
+    inputs:
+      collect:
+        description: 'Whether to record a snapshot (adds a point to the time series)'
+        type: boolean
+        default: true
+
+permissions:
+  contents: write       # committing the snapshot archive
+  pages: write
+  id-token: write
+  deployments: write    # pruning old Pages deployments
+
+# Deploys must not overlap. Let the in-flight one finish and queue the new one.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      # --ignore-scripts: stops dependencies from running postinstall (npm supply chain defense)
+      - name: Install
+        run: npm ci --ignore-scripts
+
+      # First check that the accumulated snapshots match the current registry.
+      # Add or change a wallet and leave the old snapshots as they are, and circulating supply jumps on those dates only.
+      - name: Audit archive
+        run: npm run collect -- --audit
+
+      # One point per scheduled run. A push must not add one: pushes come in bursts,
+      # and a series whose spacing follows commit activity is not a time series.
+      # If validation catches something it writes nothing and fails, so a strange number
+      # never gets into the archive quietly.
+      - name: Collect snapshot
+        if: >-
+          github.event_name == 'schedule' ||
+          (github.event_name == 'workflow_dispatch' && inputs.collect)
+        run: npm run collect
+
+      # The build only reads — it bakes the current numbers into the HTML and redraws the time series.
+      - name: Build
+        run: npm run build
+
+      - name: Commit snapshot
+        run: |
+          if [ -n "$(git status --porcelain src/data/snapshots)" ]; then
+            git config user.name  "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add src/data/snapshots
+            git commit -m "chore: supply snapshot $(date -u +%Y-%m-%d)"
+            git push
+          else
+            echo "No snapshot changes"
+          fi
+
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5
+
+      # Every run leaves a deployment record behind, and a daily cron makes that a
+      # list nobody can read. Only the newest few are of any use — the active one is
+      # always first, so it is never touched.
+      # A deployment has to be marked inactive before the API will delete it.
+      - name: Prune old deployments
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KEEP: '5'
+        run: |
+          ids=$(gh api --paginate \
+            "repos/$GITHUB_REPOSITORY/deployments?environment=github-pages&per_page=100" \
+            --jq '.[].id')
+          n=0
+          for id in $ids; do
+            n=$((n + 1))
+            [ "$n" -le "$KEEP" ] && continue
+            gh api -X POST "repos/$GITHUB_REPOSITORY/deployments/$id/statuses" \
+              -f state=inactive --silent || true
+            gh api -X DELETE "repos/$GITHUB_REPOSITORY/deployments/$id" --silent || true
+          done
+          echo "kept $KEEP of $n deployments"
