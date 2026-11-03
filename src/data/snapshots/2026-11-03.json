@@ -1,0 +1,43 @@
+{
+  "takenAt": 1793703321177,
+  "head": {
+    "chainId": 68414,
+    "blockNumber": 21904484,
+    "timestamp": 1793703319000
+  },
+  "balances": {
+    "burn": 14812350.0933127,
+    "burn-zero": 6.195476999999979,
+    "contribution-reward-distributor": 653273402,
+    "contribution-reward-dist-wallet": 0,
+    "team-vesting": 3048295.9,
+    "advisor-vesting": 2000000,
+    "cold-recycle-vault": 83883802.88175079,
+    "recycle-vault": 11830179.685502388,
+    "l1-bridge-lock": 131709513.81350616,
+    "revenue-wallet": 29883062.90790061,
+    "nuc-ipmg-wallet": 11891342.1,
+    "creator-wallet": 2945781.959886337,
+    "treasury": 2784540.7924730694,
+    "warp-fee-wallet": 33074.425154983124,
+    "hot-platform-fee-wallet": 13109.4,
+    "platform-fee-wallet": 3.27e-7,
+    "nextmeso-company": 34654500.28321095,
+    "nextmeso-user": 4388424.776738295,
+    "wnxpc": 454854.59291400906,
+    "ecosystem-builder": 9000000,
+    "nxpc-distributor": 1418.6654110276518,
+    "nxpc-claim": 332.14292,
+    "vrf-coordinator": 40.29340120000293,
+    "gas-sponsor-wallet": 377941.0504812896,
+    "ops-wallets": 1146333,
+    "contribution-reward-wallet": 0,
+    "contribution-reward-dist-wallet-old": 0,
+    "ipmg-legacy": 0,
+    "exchange-offering": 0,
+    "community-airdrop": 0,
+    "liquidity-provision": 0
+  },
+  "failures": [],
+  "fromChain": true
+}
