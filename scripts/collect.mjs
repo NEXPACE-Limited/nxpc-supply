@@ -17,12 +17,12 @@
  *   --dry-run    print the result without writing a file
  *   --force      overwrite even on verification failure or an existing file
  *   --date=…     set the date to record explicitly (default: today, UTC)
- *   --max-drift= allowed supply change vs. the previous snapshot, in %. Default 5
+ *   --max-drift= supply change vs. the previous snapshot, in %, above which the run warns. Default 5
  *   --audit      only check that every accumulated snapshot matches the current registry
  *
  * Exit codes: 0 recorded/skipped · 1 verification failed · 2 read failed
  */
-import { mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync } from 'node:fs';
+import { mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, appendFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createServer } from 'vite';
 
@@ -52,6 +52,7 @@ const MAX_DRIFT = Number(arg('max-drift', '5'));
 
 const fmt = (n) => n.toLocaleString('en-US', { maximumFractionDigits: 0 });
 const pct = (n) => `${(n * 100).toFixed(2)}%`;
+const signedPct = (n) => `${n >= 0 ? '+' : ''}${pct(n)}`;
 
 /** The previous snapshot. Compared against today's to catch abnormal changes. */
 function previous(today) {
@@ -95,18 +96,21 @@ function verify(snap, prev) {
     problems.push(`registry balances add up to more than total issued: ${fmt(held)}`);
   }
 
-  // 4) Whether it jumped overnight. It may be a real transfer, so --force can push it through.
+  // 4) Whether it jumped overnight. A burn or an unlock moves it legitimately, so a large
+  //    move is recorded and flagged rather than refused — checks 1–3 already stop bad reads.
+  const warnings = [];
+  let drift = null;
   if (prev) {
     const before = fold(prev.snap.balances).circulating;
-    const drift = Math.abs(m.circulating - before) / before;
-    if (drift * 100 > MAX_DRIFT) {
-      problems.push(
-        `circulating supply moved ${pct(drift)} since ${prev.date} — limit is ${MAX_DRIFT}%`,
+    drift = (m.circulating - before) / before;
+    if (Math.abs(drift) * 100 > MAX_DRIFT) {
+      warnings.push(
+        `circulating supply moved ${signedPct(drift)} since ${prev.date} — above ${MAX_DRIFT}%, recorded anyway`,
       );
     }
   }
 
-  return { problems, model: m };
+  return { problems, warnings, drift, model: m };
 }
 
 /**
@@ -159,7 +163,7 @@ async function main() {
   }
 
   const prev = previous(today);
-  const { problems, model } = verify(snap, prev);
+  const { problems, warnings, drift, model } = verify(snap, prev);
 
   console.log(`date            ${today}`);
   console.log(`block           #${fmt(snap.head.blockNumber)}`);
@@ -175,6 +179,18 @@ async function main() {
     const before = fold(prev.snap.balances).circulating;
     const d = model.circulating - before;
     console.log(`change          ${(d >= 0 ? '+' : '') + fmt(d)}  (${prev.date})`);
+  }
+
+  if (warnings.length) {
+    console.warn('\nwarning:');
+    for (const w of warnings) console.warn(`  · ${w}`);
+    // In Actions: an annotation on the run page, and a note the commit step puts in the snapshot commit title.
+    if (process.env.GITHUB_ACTIONS === 'true') {
+      for (const w of warnings) console.log(`::warning title=Supply moved::${w}`);
+      if (process.env.GITHUB_OUTPUT && !DRY) {
+        appendFileSync(process.env.GITHUB_OUTPUT, `note=circulating ${signedPct(drift)}\n`);
+      }
+    }
   }
 
   if (problems.length) {

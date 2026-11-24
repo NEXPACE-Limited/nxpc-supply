@@ -166,8 +166,12 @@ record, a partial read would still be stored, and a rendering error meant no dat
 at all. Collection now fails closed: if a check fails, **nothing is written**.
 
 Checks: any failed read, any registry item without a value, the equation staying
-inside its bounds, the sum of held balances not exceeding total issued, and a
-day-over-day move within `--max-drift` (5% by default).
+inside its bounds, and the sum of held balances not exceeding total issued.
+
+A day-over-day move above `--max-drift` (5% by default) does not stop the write: a
+burn or an unlock moves circulating supply that far legitimately. The snapshot is
+recorded, the run page carries a warning annotation, and the snapshot commit
+title carries the change — `chore: supply snapshot 2026-12-18 (circulating -29.70%)`.
 
 `--audit` exists because changing the registry silently invalidates older
 snapshots: a key that no longer matches reads as zero, and that date alone spikes

@@ -58,6 +58,7 @@ jobs:
       # If validation catches something it writes nothing and fails, so a strange number
       # never gets into the archive quietly.
       - name: Collect snapshot
+        id: collect
         if: >-
           github.event_name == 'schedule' ||
           (github.event_name == 'workflow_dispatch' && inputs.collect)
@@ -67,13 +68,16 @@ jobs:
       - name: Build
         run: npm run build
 
+      # A day whose supply moved more than --max-drift carries the change in the commit title.
       - name: Commit snapshot
+        env:
+          NOTE: ${{ steps.collect.outputs.note }}
         run: |
           if [ -n "$(git status --porcelain src/data/snapshots)" ]; then
             git config user.name  "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git add src/data/snapshots
-            git commit -m "chore: supply snapshot $(date -u +%Y-%m-%d)"
+            git commit -m "chore: supply snapshot $(date -u +%Y-%m-%d)${NOTE:+ ($NOTE)}"
             git push
           else
             echo "No snapshot changes"
