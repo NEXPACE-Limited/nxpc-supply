@@ -1,6 +1,9 @@
 import { defineChain } from 'viem';
 
-/** No endpoint other than the public RPC is used. */
+/**
+ * The public RPC. The browser reads it directly; the server-side reads (the build and
+ * the daily snapshot) reach the same chain through Routescan instead — see routescan.ts.
+ */
 export const RPC_URL = 'https://henesys-rpc.msu.io';
 
 /** Measured 2026-08-25: chainId 68414 (0x10b3e), average block time 2.08s. */
@@ -69,6 +72,3 @@ export const explorerAddress = (address: string) =>
   `${henesys.blockExplorers.default.url}/address/${address}`;
 
 export const MAX_RPC_BATCH = 10;
-
-/** Upper bound for a single aggregate3 call. 100 is the balance point between latency and response size. */
-export const MULTICALL_CHUNK = 100;

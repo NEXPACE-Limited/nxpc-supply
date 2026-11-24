@@ -23,6 +23,26 @@ avalanchego v1.14.2, carries Multicall3 at the canonical address, and its CORS
 preflight reflects the caller's origin, so the browser can read it directly.
 Neither batch limit is ever reached — a multicall is one `eth_call`.
 
+**Server-side Henesys reads go through Routescan.** The public RPC turns away
+automated clients on cloud networks, where CI runs, so the build and the daily
+snapshot read Henesys through Routescan's Etherscan-compatible API
+(`https://api.routescan.io/v2/network/mainnet/evm/68414/etherscan/api`), which
+forwards `eth_call` and `eth_getBlockByNumber` to a Henesys node. The browser's
+live read still goes to the public RPC. Measured 2026-11-24 — `src/lib/routescan.ts`
+encodes all of it:
+
+| Item | Measurement |
+|---|---|
+| Agreement | Same head and same balances as the public RPC |
+| Method | GET only — a POST is refused |
+| Query-string ceiling | 12,000 characters of calldata pass, 16,000 get HTTP 431 → 20 `aggregate3` entries per request |
+| Edge cache | Keyed by URL, minutes to hours → every request carries a unique `nonce` |
+| Block tag | `eth_call` takes `latest` only |
+| Requests | 3 for a snapshot, about 16 for a build, spaced 0.5s apart |
+
+The backfill and `scan-balances` are run by hand, not in CI, and still read the
+public RPC.
+
 **Measured 2026-08-25** — these numbers are encoded in the code.
 
 | Item | Measurement |

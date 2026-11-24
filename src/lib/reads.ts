@@ -1,13 +1,13 @@
 import { createPublicClient, encodeFunctionData, http, parseAbi, formatUnits } from 'viem';
-import { avalanche, henesys, AVAX_RPC, C_NXPC, RPC_URL, MULTICALL_CHUNK } from './chain';
+import { avalanche, henesys, AVAX_RPC, C_NXPC, RPC_URL } from './chain';
+import { routescan, ROUTESCAN_CHUNK } from './routescan';
 import { AVAX_CCIP_POOL } from './chains';
 import { WALLETS, READABLE } from './wallets';
 import type { LiveSpec } from './live';
 
-const client = createPublicClient({
-  chain: henesys,
-  transport: http(RPC_URL, { batch: false, retryCount: 2, timeout: 20_000 }),
-});
+/* Server-side Henesys reads — the build and the daily snapshot — go through Routescan
+   (see routescan.ts). The browser reads RPC_URL directly, through the LiveSpecs below. */
+const client = createPublicClient({ chain: henesys, transport: routescan() });
 
 /** Multicall3's built-in view helpers. They let native balances ride along in the multicall too. */
 const MULTICALL3_ABI = parseAbi([
@@ -271,7 +271,7 @@ export async function readAll(): Promise<Snapshot> {
     | { status: 'failure'; error: unknown };
 
   const results: MulticallEntry[] = [];
-  for (const part of chunk(contracts, MULTICALL_CHUNK)) {
+  for (const part of chunk(contracts, ROUTESCAN_CHUNK)) {
     const res = (await client.multicall({
       contracts: part as never,
       allowFailure: true,
@@ -345,8 +345,7 @@ export interface AddressReadResult {
  * mixed together, allowFailure isolates each entry. Ask an ERC-721 for decimals() and
  * only that entry fails while the rest come back fine (measured 2026-08-25).
  *
- * c-chain addresses are not read here. They would need a different RPC endpoint, which
- * breaks the "use only the public henesys RPC" rule, so they are left as null.
+ * c-chain addresses go through their own client and their own multicall, below.
  */
 export async function readAddresses(
   entries: {
@@ -467,7 +466,7 @@ export async function readAddresses(
 
   type Entry = { status: 'success'; result: unknown } | { status: 'failure'; error: unknown };
   const results: Entry[] = [];
-  for (const part of chunk(contracts, MULTICALL_CHUNK)) {
+  for (const part of chunk(contracts, ROUTESCAN_CHUNK)) {
     const res = (await client.multicall({
       contracts: part as never, allowFailure: true, batchSize: 0,
     })) as unknown as Entry[];

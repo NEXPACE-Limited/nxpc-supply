@@ -50,7 +50,7 @@ inside the total.
 
 ## Where the numbers come from
 
-Every figure is read from a **public RPC** — twice, on purpose.
+Every figure is read from the chain — twice, on purpose.
 
 It is read at build time and written into the HTML, so the numbers are in the
 page itself: `curl` returns them, and so does a reader with JavaScript turned
@@ -63,7 +63,11 @@ That live read is a single request. Every wallet balance and the chain head are
 packed into one `aggregate3` call, so adding wallets to the registry changes the
 size of the request, never the number of them.
 
-The Henesys figures come from Henesys (`henesys-rpc.msu.io`) and nowhere else.
+The Henesys figures come from Henesys and nowhere else. The browser reads it
+through the public RPC (`henesys-rpc.msu.io`). The build and the daily snapshot
+read the same chain through [Routescan](https://routescan.io)'s API, which
+forwards each call to a Henesys node, because the public RPC turns away
+automated clients on cloud networks, where CI runs.
 Avalanche C-Chain is read separately, through Ava Labs' public node, and it is
 read for two things: the C-Chain balances the address tab shows, and Avalanche
 circulating supply — `totalSupply − CCIP pool − the addresses we operate there`
